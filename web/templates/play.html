@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Presentation Playback</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.6.1/reveal.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.6.1/theme/black.min.css">
+  <style>
+    /* Ensure flex layouts look good inside Reveal */
+    .reveal section img { max-height: 50vh; max-width: 100%; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
+    .reveal .slides { text-align: left; }
+    .reveal .slides h1, .reveal .slides h2 { text-align: center; }
+  </style>
+</head>
+<body>
+  <div class="reveal">
+    <div class="slides">
+      <section data-markdown>
+        <textarea data-template>
+{{ markdown | safe }}
+        </textarea>
+      </section>
+    </div>
+  </div>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.6.1/reveal.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.6.1/plugin/markdown/markdown.min.js"></script>
+  <script>
+    Reveal.initialize({ 
+      hash: true, 
+      plugins: [ RevealMarkdown ]
+    });
+    // Optional: Auto-fullscreen on load
+    // Reveal.triggerKey(122); // F11 is 122
+  </script>
+</body>
+</html>

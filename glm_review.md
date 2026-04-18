@@ -1,0 +1,443 @@
+# Code Review: AI Slide Agent
+
+---
+
+## 1. Alignment Assessment
+
+The implementation broadly follows the spec, but there are **several critical misalignments** that will cause runtime failures:
+
+| Spec Requirement | Implementation Status | Severity |
+|---|---|---|
+| `POST /api/generate_slides` | ✅ Exists in backend | — |
+| `POST /api/modify_slides` | ✅ Exists in backend | — |
+| `POST /api/generate_image` | ✅ Exists in backend | — |
+| `GET /` renders `index.html` | ✅ Exists | — |
+| Image tag `![[prompt]](auto)` (double brackets) | ❌ Frontend regex matches single brackets only | **Critical** |
+| Frontend calls correct backend endpoints | ❌ Frontend calls `/api/prompt` (nonexistent) | **Critical** |
+| HTML layouts preserved in export | ❌ Export escapes all `<`/`>` | **Critical** |
+| Play/Export endpoints in spec | ❌ Not in spec, but exist in code | Minor |
+
+---
+
+## 2. Bugs & Issues
+
+### 🔴 Critical Bugs
+
+**Bug 1: Frontend calls nonexistent endpoint `/api/prompt`**
+
+The `promptAgent()` function sends requests to `/api/prompt`, but the backend only defines `/api/generate_slides` and `/api/modify_slides`. Every chat interaction will return a **404**.
+
+```javascript
+// Current (broken):
+const res = await fetch('/api/prompt', { ... });
+
+// Fix: route to the correct endpoint based on action:
+const endpoint = (action === 'generate') ? '/api/generate_slides' : '/api/modify_slides';
+const res = await fetch(endpoint, { ... });
+```
+
+---
+
+**Bug 2: Inline image regex uses single brackets, spec uses double brackets**
+
+The spec and the `SYSTEM_PROMPT` both define inline images as `![[prompt]](auto)` (double brackets). The frontend regex only matches the single-bracket form:
+
+```javascript
+// Current (won't match spec format):
+const inlineRegex = new RegExp('!\\[(.*?)\\]\\(auto\\)', 'g');
+// Matches: ![prompt](auto) ← single brackets
+
+// Fix (matches double brackets):
+const inlineRegex = new RegExp('!\\[\\[(.*?)\\]\\]\\(auto\\)', 'g');
+// Matches: ![[prompt]](auto) ← double brackets as spec defines
+```
+
+The default content in the textarea also uses single brackets, reinforcing the inconsistency. Either the spec/system-prompt or the frontend/default-content needs to be aligned — I recommend aligning everything to double brackets since that's the spec.
+
+---
+
+**Bug 3: Export destroys all HTML layout tags**
+
+The `/export` endpoint escapes `<` and `>` to `&lt;` and `&gt;`:
+
+```python
+md_escaped = md_b64.replace('<', '&lt;').replace('>', '&gt;')
+```
+
+This converts every `<div style="display: flex; ...">` into `&lt;div style="display: flex; ..."&gt;`, which Reveal.js/marked.js will render as visible text, not as layout HTML. **All multi-column layouts will be destroyed in exported presentations.**
+
+The fix: only escape `</textarea>` (the only tag that can break the textarea context), not all HTML:
+
+```python
+md_escaped = md_b64.replace('</textarea>', '&lt;/textarea&gt;')
+```
+
+---
+
+**Bug 4: Export claims "Offline HTML" but requires CDN**
+
+The "Download Offline HTML" button produces a file that references:
+```html
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.6.1/reveal.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.6.1/reveal.min.js"></script>
+```
+
+Opening the downloaded file without internet will show a broken presentation. Either embed the CSS/JS as inline strings, or change the button label to "Download HTML" and add a disclaimer.
+
+---
+
+**Bug 5: Reveal.js version mismatch between preview and export**
+
+- Live preview iframe: **4.5.0**
+- Export HTML: **4.6.1**
+
+These versions have different plugin APIs and CSS. Presentations may render differently in export vs. preview. Pin both to the same version.
+
+---
+
+### 🟠 Moderate Bugs
+
+**Bug 6: Race condition during image auto-generation**
+
+`autoGenerateImages()` captures `currentMd = editor.value` at the start, then iterates through matches and calls `currentMd.replace()`. If the user edits the textarea between sequential image API calls (each taking 40–130s), `currentMd` diverges from what the user sees. A stale match could fail to `replace()` because the user already changed that text.
+
+Fix: re-read `editor.value` before each replacement, or lock the editor during generation.
+
+---
+
+**Bug 7: Markdown code-block stripping is fragile**
+
+```python
+if text.startswith("```markdown"): text = text[11:]
+elif text.startswith("```"): text = text[3:]
+```
+
+If the LLM returns `\n```markdown\n...` (leading newline) or ` ```markdown` (leading space), the stripping fails and the markdown output starts with literal backticks. Use regex instead:
+
+```python
+text = re.sub(r'^\s*```(?:markdown)?\s*\n?', '', text)
+text = re.sub(r'\n?\s*```\s*$', '', text)
+```
+
+---
+
+**Bug 8: `text.strip()` may remove intentional blank slide separators**
+
+The spec requires slides separated by `---` surrounded by empty lines. `text.strip()` removes leading/trailing whitespace, which could collapse the first/last slide separator boundary. Use a more conservative strip or only strip null bytes.
+
+---
+
+**Bug 9: `os.makedirs` inconsistency**
+
+Module level:
+```python
+os.makedirs("static/images", exist_ok=True)  # Relative path
+```
+
+Inside `generate_image`:
+```python
+os.makedirs(os.path.join(app.static_folder, "images"), exist_ok=True)  # app.static_folder based
+```
+
+If Flask's `static_folder` isn't `"static"` (e.g., custom configuration), two separate directories will be created. Use `app.static_folder` consistently.
+
+---
+
+### 🔴 Security Issues
+
+**Security 1: Path traversal in export's `replace_img`**
+
+```python
+filepath = "." + url  # e.g., url = "/static/images/../../etc/passwd"
+```
+
+The regex restricts matching to `/static/images/...` but does not prevent traversal *within* that path (e.g., `/static/images/../../etc/passwd` would resolve to `./etc/passwd`). Fix:
+
+```python
+def replace_img(match):
+    url = match.group(1)
+    filename = url.replace('/static/images/', '')
+    filepath = os.path.join(app.static_folder, "images", filename)
+    filepath = os.path.realpath(filepath)
+    # Verify the resolved path is still inside the images directory
+    if not filepath.startswith(os.path.realpath(os.path.join(app.static_folder, "images"))):
+        return url  # Reject traversal attempts
+    ...
+```
+
+---
+
+**Security 2: XSS via markdown injection in iframe preview**
+
+The live preview uses `iframeDoc.write()` with unescaped markdown inside a `<textarea>`. While `<textarea>` is mostly safe (only `</textarea>` can break out), the code only escapes that one tag:
+
+```javascript
+mdContent.replace(/<\/textarea>/ig, "&lt;/textarea&gt;")
+```
+
+But `<textarea>` in HTML is *not* a true security boundary for all content. Reveal.js/marked.js will then parse the content and render it as HTML inside the iframe. A malicious prompt like `<img src=x onerror=alert(1)>` would execute. Since this is a local tool, risk is lower, but it should still be noted. For a production deployment, sanitize the markdown or use a sandboxed iframe with CSP.
+
+---
+
+**Security 3: No authentication on any endpoint**
+
+All API endpoints are unauthenticated and exposed on `0.0.0.0:8080`. Any network-reachable client can generate images (costing GPU resources), read generated images, or trigger expensive LLM calls. Add at least basic API key auth.
+
+---
+
+**Security 4: No file cleanup / disk exhaustion**
+
+Every image generation writes a new PNG to `static/images/` with no expiration or cleanup. Over time, this directory grows unbounded. Add a cleanup mechanism (e.g., delete files older than N hours, or cap directory size).
+
+---
+
+**Security 5: Flask runs on `0.0.0.0` without debug=False**
+
+```python
+app.run(host='0.0.0.0', port=8080)
+```
+
+No explicit `debug=False`. If environment variables or config enable debug mode, the Werkzeug debugger provides an interactive Python console to any attacker. Explicitly set:
+
+```python
+app.run(host='0.0.0.0', port=8080, debug=False)
+```
+
+---
+
+## 3. Test Recommendations (`test_app.py`)
+
+```python
+import pytest
+import json
+import base64
+import os
+import re
+from unittest.mock import patch, MagicMock
+from app import app, SYSTEM_PROMPT, TEXT_MODEL, IMAGE_MODEL
+
+@pytest.fixture
+def client():
+    app.config['TESTING'] = True
+    with app.test_client() as c:
+        yield c
+
+@pytest.fixture
+def mock_llm_response():
+    """Returns a mock LLM response with markdown content."""
+    return {
+        "choices": [{
+            "message": {
+                "content": "# Slide 1\n\nHello\n\n---\n\n# Slide 2\n\nWorld"
+            }
+        }]
+    }
+
+@pytest.fixture
+def mock_llm_response_with_codeblock():
+    """Returns a mock LLM response wrapped in markdown code block."""
+    return {
+        "choices": [{
+            "message": {
+                "content": "```markdown\n# Slide 1\n\nHello\n\n---\n\n# Slide 2\n\nWorld\n```"
+            }
+        }]
+    }
+
+@pytest.fixture
+def mock_image_response():
+    """Returns a mock image generation response with a small base64 PNG."""
+    # 1x1 red pixel PNG
+    png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="
+    return {"data": [{"b64_json": png_b64}]}
+
+
+# --- Endpoint Existence & Routing Tests ---
+
+class TestEndpointRouting:
+    """Verify that frontend-targeted endpoints exist and return correct status codes."""
+
+    def test_get_index_exists(self, client):
+        """GET / should return 200 and render index.html."""
+        resp = client.get('/')
+        assert resp.status_code == 200
+        assert 'AI Slide Agent' in resp.data.decode()
+
+    def test_generate_slides_endpoint_exists(self, client):
+        """POST /api/generate_slides should exist (not 404)."""
+        with patch('app.requests.post') as mock_post:
+            mock_post.return_value = MagicMock(
+                status_code=200,
+                json=lambda: mock_llm_response().__dict__ if False else {
+                    "choices": [{"message": {"content": "# Test"}}]
+                }
+            )
+            resp = client.post('/api/generate_slides',
+                               json={"prompt": "test"})
+            assert resp.status_code == 200
+
+    def test_modify_slides_endpoint_exists(self, client):
+        """POST /api/modify_slides should exist (not 404)."""
+        with patch('app.requests.post') as mock_post:
+            mock_post.return_value = MagicMock(
+                status_code=200,
+                json=lambda: {"choices": [{"message": {"content": "# Modified"}}]}
+            )
+            resp = client.post('/api/modify_slides',
+                               json={"prompt": "change it", "current_markdown": "# Old"})
+            assert resp.status_code == 200
+
+    def test_generate_image_endpoint_exists(self, client):
+        """POST /api/generate_image should exist (not 404)."""
+        with patch('app.requests.post') as mock_post:
+            mock_post.return_value = MagicMock(
+                status_code=200,
+                json=lambda: mock_image_response()
+            )
+            resp = client.post('/api/generate_image',
+                               json={"prompt": "a sunset"})
+            assert resp.status_code == 200
+
+    def test_api_prompt_does_not_exist(self, client):
+        """POST /api/prompt should return 404 — confirming Bug #1."""
+        resp = client.post('/api/prompt', json={"prompt": "test"})
+        assert resp.status_code == 404
+
+
+# --- Markdown Code-Block Stripping Tests ---
+
+class TestCodeBlockStripping:
+    """Test that LLM output wrapping in code blocks is correctly removed."""
+
+    def test_strip_markdown_codeblock_prefix(self, client):
+        with patch('app.requests.post') as mock_post:
+            mock_post.return_value = MagicMock(
+                status_code=200,
+                json=lambda: {
+                    "choices": [{"message": {"content": "```markdown\n# Hello\n```"}}]
+                }
+            )
+            resp = client.post('/api/generate_slides', json={"prompt": "hi"})
+            data = resp.get_json()
+            assert not data["markdown"].startswith("```")
+            assert "# Hello" in data["markdown"]
+
+    def test_strip_generic_codeblock_prefix(self, client):
+        with patch('app.requests.post') as mock_post:
+            mock_post.return_value = MagicMock(
+                status_code=200,
+                json=lambda: {
+                    "choices": [{"message": {"content": "```\n# Hello\n```"}}]
+                }
+            )
+            resp = client.post('/api/generate_slides', json={"prompt": "hi"})
+            data = resp.get_json()
+            assert not data["markdown"].startswith("```")
+
+    def test_no_strip_when_no_codeblock(self, client):
+        with patch('app.requests.post') as mock_post:
+            raw = "# Hello\n\n---\n\n# World"
+            mock_post.return_value = MagicMock(
+                status_code=200,
+                json=lambda: {"choices": [{"message": {"content": raw}}]}
+            )
+            resp = client.post('/api/generate_slides', json={"prompt": "hi"})
+            data = resp.get_json()
+            assert data["markdown"] == raw
+
+    def test_strip_with_leading_whitespace_bug(self, client):
+        """Reveals Bug #7: leading whitespace before ``` prevents stripping."""
+        with patch('app.requests.post') as mock_post:
+            mock_post.return_value = MagicMock(
+                status_code=200,
+                json=lambda: {
+                    "choices": [{"message": {"content": "\n```markdown\n# Hello\n```"}}]
+                }
+            )
+            resp = client.post('/api/generate_slides', json={"prompt": "hi"})
+            data = resp.get_json()
+            # Currently FAILS — the backticks remain because of the leading newline
+            assert not data["markdown"].startswith("```"), \
+                "Bug #7: code-block stripping fails with leading whitespace"
+
+
+# --- Image Generation & Storage Tests ---
+
+class TestImageGeneration:
+    def test_image_saved_and_url_returned(self, client, mock_image_response):
+        with patch('app.requests.post') as mock_post:
+            mock_post.return_value = MagicMock(
+                status_code=200,
+                json=lambda: mock_image_response
+            )
+            resp = client.post('/api/generate_image', json={"prompt": "test img"})
+            data = resp.get_json()
+            assert "image_url" in data
+            assert data["image_url"].startswith("/static/images/")
+            # Verify the file was actually written
+            filename = data["image_url"].split("/")[-1]
+            filepath = os.path.join(app.static_folder, "images", filename)
+            assert os.path.exists(filepath)
+
+    def test_image_endpoint_handles_llm_error(self, client):
+        with patch('app.requests.post') as mock_post:
+            mock_post.return_value = MagicMock(
+                status_code=500,
+                raise_for_status=lambda: (_ for _ in ()).throw(
+                    Exception("LLM service unavailable")
+                )
+            )
+            resp = client.post('/api/generate_image', json={"prompt": "test"})
+            assert resp.status_code == 500
+            assert "error" in resp.get_json()
+
+    def test_empty_prompt_returns_error_or_empty(self, client):
+        """Edge case: what happens with an empty prompt?"""
+        with patch('app.requests.post') as mock_post:
+            mock_post.return_value = MagicMock(
+                status_code=200,
+                json=lambda: mock_image_response()
+            )
+            resp = client.post('/api/generate_image', json={"prompt": ""})
+            # Should still work (the model gets an empty prompt) but verify it doesn't crash
+            assert resp.status_code in [200, 400, 500]
+
+
+# --- System Prompt & Request Construction Tests ---
+
+class TestRequestConstruction:
+    def test_generate_slides_sends_correct_model_and_system_prompt(self, client):
+        with patch('app.requests.post') as mock_post:
+            mock_post.return_value = MagicMock(
+                status_code=200,
+                json=lambda: {"choices": [{"message": {"content": "# Test"}}]}
+            )
+            client.post('/api/generate_slides', json={"prompt": "make slides"})
+            call_args = mock_post.call_args
+            payload = call_args[1]['json']
+            assert payload['model'] == TEXT_MODEL
+            assert payload['messages'][0]['role'] == 'system'
+            assert payload['messages'][0]['content'] == SYSTEM_PROMPT
+            assert payload['messages'][1]['role'] == 'user'
+            assert payload['messages'][1]['content'] == "make slides"
+
+    def test_modify_slides_includes_current_markdown(self, client):
+        with patch('app.requests.post') as mock_post:
+            mock_post.return_value = MagicMock(
+                status_code=200,
+                json=lambda: {"choices": [{"message": {"content": "# Modified"}}]}
+            )
+            current_md = "# Existing\n\n---\n\n## Slide 2"
+            client.post('/api/modify_slides',
+                        json={"prompt": "add a slide", "current_markdown": current_md})
+            call_args = mock_post.call_args
+            payload = call_args[1]['json']
+            user_msg = payload['messages'][2]['content']
+            assert current_md in user_msg
+            assert "add a slide" in user_msg
+
+    def test_modify_slides_system_prompt_includes_preservation_note(self, client):
+        with patch('app.requests.post') as mock_post:
+            mock_post.return_value = MagicMock(
+                status_code=200,
+                json=lambda: {"choices": [{"message":

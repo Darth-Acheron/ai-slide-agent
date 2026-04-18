@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Slide Agent</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    #editor-pane { resize: horizontal; overflow: hidden; min-width: 300px; width: 40%; max-width: 70%; border-right: 2px solid #e5e7eb; }
+    textarea { font-family: monospace; white-space: pre; }
+    .loader { border: 4px solid #f3f3f3; border-top: 4px solid #3498db; border-radius: 50%; width: 24px; height: 24px; animation: spin 1s linear infinite; display: inline-block; vertical-align: middle; margin-left: 8px;}
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+  </style>
+</head>
+<body class="h-screen flex flex-col bg-gray-50 text-gray-800">
+  <!-- Header -->
+  <header class="bg-gray-900 text-white p-4 shadow-md flex justify-between items-center">
+    <h1 class="text-xl font-bold flex items-center">
+      <svg class="w-6 h-6 mr-2 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z"></path></svg>
+      AI Agent: Markdown -> Slides
+    </h1>
+    <div class="flex items-center space-x-4">
+      <div class="text-sm bg-gray-800 px-3 py-1 rounded">Models: Gemini-3.1 / Imagen-4.0</div>
+      
+      <!-- Fullscreen & Export Actions -->
+      <form id="actions-form" method="POST" target="_blank" class="flex space-x-2 m-0 p-0">
+        <input type="hidden" name="markdown" id="hidden-md">
+        <button type="button" onclick="submitForm('/play')" class="bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1.5 rounded shadow text-sm font-semibold transition">📺 Play Fullscreen</button>
+        <button type="button" onclick="submitForm('/export')" class="bg-teal-600 hover:bg-teal-700 text-white px-3 py-1.5 rounded shadow text-sm font-semibold transition" title="Images embedded, requires internet for Reveal.js CDN">⬇️ Download HTML</button>
+      </form>
+    </div>
+  </header>
+
+  <!-- Main Content -->
+  <div class="flex-1 flex overflow-hidden">
+    <!-- Left Pane: Editor -->
+    <div id="editor-pane" class="flex flex-col bg-white h-full relative z-10 shadow-lg">
+      <div class="p-4 border-b">
+        <label class="block text-sm font-semibold mb-2">Prompt Agent to Generate or Modify Slides:</label>
+        <div class="flex space-x-2">
+          <input type="text" id="prompt-input" class="flex-1 border p-2 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="e.g. 5-slide deck on AI with 2-column layouts and inline images...">
+        </div>
+        <div class="flex flex-wrap gap-2 mt-3">
+          <button onclick="generateSlides()" id="btn-generate" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded shadow transition">Generate New</button>
+          <button onclick="modifySlides()" id="btn-modify" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded shadow transition">Modify Current</button>
+          <div id="text-loader" class="loader hidden"></div>
+        </div>
+      </div>
+      
+      <div class="p-4 bg-gray-100 border-b flex justify-between items-center">
+        <h2 class="text-sm font-semibold">Markdown Editor</h2>
+        <button onclick="autoGenerateImages()" id="btn-images" class="bg-purple-600 hover:bg-purple-700 text-white text-xs px-3 py-1.5 rounded shadow transition flex items-center">
+          <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+          Auto-Gen Images (Bg + Inline)
+        </button>
+        <div id="img-loader" class="loader hidden"></div>
+      </div>
+
+      <textarea id="md-editor" class="flex-1 w-full p-4 focus:outline-none text-sm text-gray-700" oninput="debouncePreview()">
+# AI Slide Agent
+
+Enter a prompt above and click "Generate New" to start!
+
+---
+
+<!-- bg: A futuristic grid network abstract background -->
+## Multi-Column Layouts
+
+<div style="display: flex; gap: 20px; align-items: center;">
+  <div style="flex: 1;">
+    - Point 1: You can write standard markdown.
+    - Point 2: Use flexbox for side-by-side elements.
+  </div>
+  <div style="flex: 1;">
+    ![[A robot painting on an easel]](auto)
+  </div>
+</div>
+      </textarea>
+    </div>
+
+    <!-- Right Pane: Live Preview -->
+    <div class="flex-1 h-full bg-gray-200 relative group">
+      <button onclick="updatePreview()" class="absolute top-2 right-4 z-10 px-3 py-1 bg-white border border-gray-300 shadow rounded text-sm text-gray-700 font-bold hover:bg-gray-100 opacity-50 hover:opacity-100 transition-opacity">
+        ↻ Refresh Preview
+      </button>
+      <iframe id="preview-frame" class="w-full h-full border-none"></iframe>
+    </div>
+  </div>
+
+  <script>
+    let timeoutId;
+    const editor = document.getElementById('md-editor');
+    const previewFrame = document.getElementById('preview-frame');
+
+    updatePreview();
+
+    function debouncePreview() {
+      clearTimeout(timeoutId);
+      timeoutId = setTimeout(updatePreview, 500);
+    }
+
+    function generateSlides() { promptAgent('generate'); }
+    function modifySlides() { promptAgent('modify'); }
+
+    function submitForm(action) {
+      document.getElementById('hidden-md').value = editor.value;
+      const form = document.getElementById('actions-form');
+      form.action = action;
+      form.submit();
+    }
+
+    function updatePreview() {
+      const mdContent = editor.value;
+      
+      const doc = `
+<!DOCTYPE html>
+<html>
+<head>
+  <base href="${window.location.origin}/">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.6.1/reset.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.6.1/reveal.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.6.1/theme/black.min.css" id="theme">
+  <style>
+    .reveal section img { background: none; border: none; box-shadow: none; max-height: 50vh; }
+    .reveal .slides { text-align: left; }
+    .reveal h1, .reveal h2, .reveal h3 { text-transform: none; }
+  </style>
+</head>
+<body>
+  <div class="reveal">
+    <div class="slides">
+      <section data-markdown>
+        <textarea data-template>
+${mdContent.replace(/<\/textarea>/ig, "&lt;/textarea&gt;")}
+        </textarea>
+      </section>
+    </div>
+  </div>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.6.1/reveal.min.js"><\/script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.6.1/plugin/markdown/markdown.min.js"><\/script>
+  <script>
+    Reveal.initialize({
+      plugins: [ RevealMarkdown ],
+      slideNumber: true,
+      hash: true
+    });
+  <\/script>
+</body>
+</html>`;
+      
+      // Rewrite the iframe using document.write to avoid Blob URL cross-origin / path resolution issues
+      const iframeDoc = previewFrame.contentWindow.document;
+      iframeDoc.open();
+      iframeDoc.write(doc);
+      iframeDoc.close();
+    }
+
+    async function promptAgent(action) {
+      const promptText = document.getElementById('prompt-input').value;
+      const btn = (action === 'generate') ? document.getElementById('btn-generate') : document.getElementById('btn-modify');
+      const originalText = btn.innerHTML;
+      
+      if(!promptText.trim()) {
+        alert("Please enter a prompt.");
+        return;
+      }
+
+      btn.innerHTML = `<span class="animate-spin inline-block mr-2">⏳</span> Working...`;
+      btn.disabled = true;
+
+      try {
+        const payload = { prompt: promptText };
+        if (action === 'modify') {
+            payload.current_markdown = editor.value;
+        }
+
+        const endpoint = action === 'modify' ? '/api/modify_slides' : '/api/generate_slides';
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        
+        if (data.markdown) {
+            editor.value = data.markdown;
+            updatePreview();
+        } else if (data.error) {
+            alert("Error: " + data.error);
+        }
+      } catch (err) {
+        alert("Failed to contact agent: " + err);
+      } finally {
+        btn.innerHTML = originalText;
+        btn.disabled = false;
+      }
+    }
+
+    async function autoGenerateImages() {
+      const btn = document.getElementById('btn-images');
+      const originalText = btn.innerHTML;
+      btn.innerHTML = `<span class="animate-spin inline-block mr-2">⏳</span> Generating Images... (~130s each)`;
+      btn.disabled = true;
+
+      let currentMd = editor.value;
+      
+      // We use simple regex matching
+      const bgRegex = new RegExp('<!--\\s*bg:\\s*(.*?)\\s*-->', 'g');
+      const inlineRegex = new RegExp('!\\\[\\\[(.*?)\\]\\]\\(auto\\)', 'g');
+
+      try {
+        // Find backgrounds
+        const bgMatches = [...currentMd.matchAll(bgRegex)];
+        for (const match of bgMatches) {
+          const fullMatch = match[0];
+          const prompt = match[1];
+          console.log("Generating bg image for:", prompt);
+          
+          const res = await fetch('/api/generate_image', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ prompt })
+          });
+          const data = await res.json();
+          if (data.error) { throw new Error(data.error); }
+          if (data.image_url) {
+            const newTag = `<!-- .slide: data-background-image="${data.image_url}" -->`;
+            currentMd = currentMd.replace(fullMatch, newTag);
+            editor.value = currentMd;
+            updatePreview();
+          }
+        }
+
+        // Find inline
+        const inlineMatches = [...currentMd.matchAll(inlineRegex)];
+        for (const match of inlineMatches) {
+          const fullMatch = match[0];
+          const prompt = match[1];
+          console.log("Generating inline image for:", prompt);
+          
+          const res = await fetch('/api/generate_image', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ prompt })
+          });
+          const data = await res.json();
+          if (data.error) { throw new Error(data.error); }
+          if (data.image_url) {
+            const newTag = `<img src="${data.image_url}" alt="${prompt}" style="max-width:100%; border-radius:8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">`;
+            currentMd = currentMd.replace(fullMatch, newTag);
+            editor.value = currentMd;
+            updatePreview();
+          }
+        }
+        
+      } catch (err) {
+        alert("Image generation failed: " + err);
+      } finally {
+        btn.innerHTML = originalText;
+        btn.disabled = false;
+      }
+    }
+</script>
+</body>
+</html>
