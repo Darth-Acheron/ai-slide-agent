@@ -1,0 +1,15 @@
+# Ignore images generated during testing
+*/static/images/*.png
+*.png
+
+# Ignore Python cache
+__pycache__/
+*.pyc
+
+# Ignore macOS system files
+.DS_Store
+*/.DS_Store
+
+# Ignore testing outputs
+glm_output.txt
+.pytest_cache/
