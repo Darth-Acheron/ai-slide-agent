@@ -40,7 +40,7 @@ def run_glm_review():
     print("Calling GLM-5.1 via DashScope API...")
     url = "https://dashscope.aliyuncs.com/apps/anthropic/v1/messages"
     headers = {
-        "x-api-key": "sk-3fe27ec4c2ea4b6887dd6a80f0debe70",
+        "x-api-key": os.environ.get("DASHSCOPE_API_KEY", ""),
         "anthropic-version": "2023-06-01",
         "content-type": "application/json"
     }
